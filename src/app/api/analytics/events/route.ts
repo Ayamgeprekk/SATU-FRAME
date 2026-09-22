@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { analyticsStore } from '@/server/analytics-store';
 import { AnalyticsEventName } from '@/types/analytics';
 
+export const dynamic = 'force-dynamic';
+
 const VALID_EVENT_NAMES: Set<string> = new Set([
   'landing_view',
   'create_room',

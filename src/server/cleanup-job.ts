@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { sessionStateManager } from './state-machine';
 import { roomCreationLimiter, photoUploadLimiter } from './rate-limiter';
+import { getUploadsDir } from './storage-helper';
 
 /**
  * Background TTL & Session Storage Purge Job (PRD §11.5, §14.4 UU PDP)
@@ -24,7 +25,7 @@ export function runCleanupCycle(): {
     sessionStateManager.expireSession(session.id);
 
     // If session is older than TTL or expired without payment, remove uploaded photo files
-    const sessionUploadDir = path.join(process.cwd(), 'temp_uploads', session.id);
+    const sessionUploadDir = getUploadsDir(session.id);
     if (fs.existsSync(sessionUploadDir)) {
       try {
         fs.rmSync(sessionUploadDir, { recursive: true, force: true });

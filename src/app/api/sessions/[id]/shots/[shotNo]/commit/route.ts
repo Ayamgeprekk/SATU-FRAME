@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { sessionStateManager } from '@/server/state-machine';
 import { photoUploadLimiter } from '@/server/rate-limiter';
+import { getUploadsDir, ensureDirExists } from '@/server/storage-helper';
 import fs from 'fs';
 import path from 'path';
 
@@ -45,11 +46,9 @@ export async function POST(
       return NextResponse.json({ error: 'Invalid JPEG file signature' }, { status: 400 });
     }
 
-    // Save to temp storage directory
-    const storageDir = path.join(process.cwd(), 'temp_uploads', sessionId);
-    if (!fs.existsSync(storageDir)) {
-      fs.mkdirSync(storageDir, { recursive: true });
-    }
+    // Save to temp storage directory (serverless safe)
+    const storageDir = getUploadsDir(sessionId);
+    ensureDirExists(storageDir);
 
     const fileName = `${shotNo}_${participantId}.jpg`;
     const filePath = path.join(storageDir, fileName);
@@ -58,7 +57,7 @@ export async function POST(
     const storageKey = `sessions/${sessionId}/shots/${fileName}`;
     const url = `/api/storage/${sessionId}/${fileName}`;
 
-    const { bothSaved, allShotsDone } = sessionStateManager.saveShotPhoto(
+    const { bothSaved, allShotsDone, session } = await sessionStateManager.saveShotPhotoAsync(
       sessionId,
       participantId,
       shotNo,
@@ -76,7 +75,7 @@ export async function POST(
       success: true,
       bothSaved,
       allShotsDone,
-      session: sessionStateManager.getSession(sessionId),
+      session: session || (await sessionStateManager.getSessionAsync(sessionId)),
     });
   } catch (err: any) {
     console.error('Error committing photo shot:', err);

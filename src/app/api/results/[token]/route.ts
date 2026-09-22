@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { sessionStateManager } from '@/server/state-machine';
 import { renderPhotostripServer } from '@/server/server-renderer';
+import { getUploadsDir, ensureDirExists, getStorageFilePath } from '@/server/storage-helper';
 import fs from 'fs';
 import path from 'path';
 
@@ -17,22 +18,20 @@ export async function GET(
       return NextResponse.json({ error: 'Hasil sesi tidak ditemukan' }, { status: 404 });
     }
 
-    const storageDir = path.join(process.cwd(), 'temp_uploads', session.id);
+    const storageDir = getUploadsDir(session.id);
     const fileName = `${format}_${session.tier}.jpg`;
     const filePath = path.join(storageDir, fileName);
 
     // If photostrip image does not exist yet on disk, render it via Sharp
     if (!fs.existsSync(filePath)) {
-      if (!fs.existsSync(storageDir)) {
-        fs.mkdirSync(storageDir, { recursive: true });
-      }
+      ensureDirExists(storageDir);
 
       // Collect available photos
       const photoBuffers: { slotIndex: number; buffer: Buffer }[] = [];
-      const sessionPhotos = sessionStateManager.getPhotos(session.id);
+      const sessionPhotos = await sessionStateManager.getPhotosAsync(session.id);
 
       for (const p of sessionPhotos) {
-        const pPath = path.join(process.cwd(), 'temp_uploads', session.id, `${p.shotNo}_${p.participantId}.jpg`);
+        const pPath = getStorageFilePath(session.id, `${p.shotNo}_${p.participantId}.jpg`);
         if (fs.existsSync(pPath)) {
           const buf = fs.readFileSync(pPath);
           const isCreator = p.participantId === session.creatorParticipantId;

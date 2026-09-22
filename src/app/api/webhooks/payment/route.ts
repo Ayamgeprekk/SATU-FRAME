@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { paymentService } from '@/lib/payment/payment-service';
 import { sessionStateManager } from '@/server/state-machine';
 import { renderPhotostripServer } from '@/server/server-renderer';
+import { getUploadsDir, ensureDirExists, getStorageFilePath } from '@/server/storage-helper';
 import fs from 'fs';
 import path from 'path';
 
@@ -25,22 +26,23 @@ export async function POST(req: NextRequest) {
     if (isPaid) {
       const order = paymentService.markOrderPaid(orderId);
       if (order) {
-        const session = sessionStateManager.getSession(order.sessionId);
+        const session = await sessionStateManager.getSessionAsync(order.sessionId);
         if (session) {
           session.tier = 'paid_hd';
           session.stateVersion += 1;
 
           // Pre-render HD clean photostrip (without watermark)
           try {
-            const storageDir = path.join(process.cwd(), 'temp_uploads', session.id);
+            const storageDir = getUploadsDir(session.id);
+            ensureDirExists(storageDir);
             const fileName = `strip_paid_hd.jpg`;
             const filePath = path.join(storageDir, fileName);
 
             const photoBuffers: { slotIndex: number; buffer: Buffer }[] = [];
-            const sessionPhotos = sessionStateManager.getPhotos(session.id);
+            const sessionPhotos = await sessionStateManager.getPhotosAsync(session.id);
 
             for (const p of sessionPhotos) {
-              const pPath = path.join(process.cwd(), 'temp_uploads', session.id, `${p.shotNo}_${p.participantId}.jpg`);
+              const pPath = getStorageFilePath(session.id, `${p.shotNo}_${p.participantId}.jpg`);
               if (fs.existsSync(pPath)) {
                 const buf = fs.readFileSync(pPath);
                 const isCreator = p.participantId === session.creatorParticipantId;

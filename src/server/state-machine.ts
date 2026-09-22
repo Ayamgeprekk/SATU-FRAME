@@ -249,45 +249,30 @@ export class SessionStateManager {
   }
 
   public async getSessionAsync(sessionId: string): Promise<Session | undefined> {
-    const s = this.getSession(sessionId);
-    if (s) return s;
-
     const cloudSess = await cloudGet<Session>(`session_${sessionId}`);
     if (cloudSess) {
       this.sessions.set(sessionId, cloudSess);
-      const parts = await cloudGet<Participant[]>(`parts_${sessionId}`);
-      if (parts) {
-        this.participants.set(sessionId, parts);
-      }
-      this.saveState();
       return cloudSess;
     }
-    return undefined;
+    return this.getSession(sessionId);
   }
 
   public async getSessionByRoomCodeAsync(code: string): Promise<Session | undefined> {
-    const s = this.getSessionByRoomCode(code);
-    if (s) return s;
-
     const upper = code.toUpperCase().trim();
     const sessionId = await cloudGet<string>(`room_${upper}`);
     if (sessionId) {
       return await this.getSessionAsync(sessionId);
     }
-    return undefined;
+    return this.getSessionByRoomCode(code);
   }
 
   public async getParticipantsAsync(sessionId: string): Promise<Participant[]> {
-    const localParts = this.getParticipants(sessionId);
-    if (localParts && localParts.length > 0) return localParts;
-
     const cloudParts = await cloudGet<Participant[]>(`parts_${sessionId}`);
     if (cloudParts && cloudParts.length > 0) {
       this.participants.set(sessionId, cloudParts);
-      this.saveState();
       return cloudParts;
     }
-    return [];
+    return this.getParticipants(sessionId);
   }
 
   public async joinSessionAsync(sessionId: string, displayName = 'Partner'): Promise<{ participant: Participant }> {
@@ -401,15 +386,17 @@ export class SessionStateManager {
   public async getCaptureScheduleAsync(
     sessionId: string
   ): Promise<{ tTargetServer: number; shotNo: number } | null> {
-    let sched = this.getCaptureSchedule(sessionId);
-    if (sched) return sched;
-
-    sched = await cloudGet<{ tTargetServer: number; shotNo: number }>(`sched_${sessionId}`);
-    if (sched && Date.now() > sched.tTargetServer + 5000) {
-      await cloudSet(`sched_${sessionId}`, null);
-      return null;
+    const cloudSched = await cloudGet<{ tTargetServer: number; shotNo: number }>(`sched_${sessionId}`);
+    if (cloudSched !== undefined && cloudSched !== null) {
+      if (Date.now() > cloudSched.tTargetServer + 4000) {
+        await cloudSet(`sched_${sessionId}`, null);
+        this.captureSchedules.delete(sessionId);
+        return null;
+      }
+      this.captureSchedules.set(sessionId, cloudSched);
+      return cloudSched;
     }
-    return sched;
+    return this.getCaptureSchedule(sessionId);
   }
 
   public async abortCaptureAsync(sessionId: string): Promise<void> {
@@ -460,6 +447,18 @@ export class SessionStateManager {
 
   public getPhotos(sessionId: string): SessionPhoto[] {
     return this.photos.get(sessionId) || [];
+  }
+
+  public async getPhotosAsync(sessionId: string): Promise<SessionPhoto[]> {
+    let p = this.photos.get(sessionId);
+    if (p && p.length > 0) return p;
+
+    const cloudPhotos = await cloudGet<SessionPhoto[]>(`photos_${sessionId}`);
+    if (cloudPhotos && Array.isArray(cloudPhotos)) {
+      this.photos.set(sessionId, cloudPhotos);
+      return cloudPhotos;
+    }
+    return [];
   }
 
   public updateTemplate(sessionId: string, templateId: string): Session | undefined {
@@ -693,29 +692,115 @@ export class SessionStateManager {
     photoList.push(photo);
     this.photos.set(sessionId, photoList);
 
-    // Check if both participants have uploaded for this shot
+    const parts = this.participants.get(sessionId) || [];
     const currentShotPhotos = photoList.filter((p) => p.shotNo === shotNo && p.status === 'SAVED');
-    const bothSaved = currentShotPhotos.length >= 2;
+    const requiredPhotos = Math.max(1, Math.min(parts.length || 1, 2));
+    const bothSaved = currentShotPhotos.length >= requiredPhotos;
 
     if (bothSaved) {
-      session.shotCountSaved += 1;
+      const savedShots = new Set(photoList.filter((p) => p.status === 'SAVED').map((p) => p.shotNo));
+      session.shotCountSaved = savedShots.size;
       const allShotsDone = session.shotCountSaved >= session.shotCountTarget;
 
       if (allShotsDone) {
         session.state = 'REVIEW';
       } else {
         session.state = 'SHOT_SAVED';
-        session.currentShotNo += 1;
-        // Reset readiness for next shot
-        const parts = this.participants.get(sessionId) || [];
+        session.currentShotNo = Math.min(session.shotCountTarget, shotNo + 1);
         parts.forEach((p) => (p.ready = false));
       }
       session.stateVersion += 1;
+      this.captureSchedules.delete(sessionId);
+      this.saveState();
 
       return { bothSaved: true, allShotsDone };
     }
 
+    this.saveState();
     return { bothSaved: false, allShotsDone: false };
+  }
+
+  /**
+   * Asynchronous photo shot save with distributed cloud KV persistence
+   */
+  public async saveShotPhotoAsync(
+    sessionId: string,
+    participantId: string,
+    shotNo: number,
+    storageKey: string,
+    url: string,
+    dimensions: { width: number; height: number; bytes: number; tFrameServerEst?: number }
+  ): Promise<{ bothSaved: boolean; allShotsDone: boolean; session?: Session }> {
+    let session = await this.getSessionAsync(sessionId);
+    if (!session) return { bothSaved: false, allShotsDone: false };
+
+    const parts = (await this.getParticipantsAsync(sessionId)) || [];
+    let photoList = await this.getPhotosAsync(sessionId);
+
+    const existingIndex = photoList.findIndex(
+      (p) => p.shotNo === shotNo && p.participantId === participantId
+    );
+    const photoId = uuidv4();
+    const photo: SessionPhoto = {
+      id: photoId,
+      sessionId,
+      participantId,
+      shotNo,
+      storageKey,
+      url,
+      bytes: dimensions.bytes,
+      width: dimensions.width,
+      height: dimensions.height,
+      status: 'SAVED',
+      tFrameServerEst: dimensions.tFrameServerEst,
+      createdAt: Date.now(),
+    };
+
+    if (existingIndex >= 0) {
+      photoList[existingIndex] = photo;
+    } else {
+      photoList.push(photo);
+    }
+    this.photos.set(sessionId, photoList);
+
+    const currentShotPhotos = photoList.filter((p) => p.shotNo === shotNo && p.status === 'SAVED');
+    const requiredPhotos = Math.max(1, Math.min(parts.length || 1, 2));
+    const bothSaved = currentShotPhotos.length >= requiredPhotos;
+
+    if (bothSaved) {
+      const savedShots = new Set(photoList.filter((p) => p.status === 'SAVED').map((p) => p.shotNo));
+      session.shotCountSaved = savedShots.size;
+      const allShotsDone = session.shotCountSaved >= session.shotCountTarget;
+
+      if (allShotsDone) {
+        session.state = 'REVIEW';
+      } else {
+        session.state = 'SHOT_SAVED';
+        session.currentShotNo = Math.min(session.shotCountTarget, shotNo + 1);
+        parts.forEach((p) => (p.ready = false));
+      }
+      session.stateVersion += 1;
+      this.sessions.set(sessionId, session);
+      this.captureSchedules.delete(sessionId);
+      this.saveState();
+
+      await Promise.all([
+        cloudSet(`photos_${sessionId}`, photoList),
+        cloudSet(`session_${sessionId}`, session),
+        cloudSet(`parts_${sessionId}`, parts),
+        cloudSet(`sched_${sessionId}`, null),
+      ]);
+
+      return { bothSaved: true, allShotsDone, session };
+    }
+
+    this.saveState();
+    await Promise.all([
+      cloudSet(`photos_${sessionId}`, photoList),
+      cloudSet(`session_${sessionId}`, session),
+    ]);
+
+    return { bothSaved: false, allShotsDone: false, session };
   }
 
   /**

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getStorageFilePath } from '@/server/storage-helper';
 import fs from 'fs';
 import path from 'path';
 
@@ -8,9 +9,8 @@ export async function GET(
 ) {
   try {
     const { sessionId, fileName } = params;
-    // Sanitize fileName to prevent directory traversal
-    const safeFileName = path.basename(fileName);
-    const filePath = path.join(process.cwd(), 'temp_uploads', sessionId, safeFileName);
+    // Sanitize fileName and locate file across storage locations
+    const filePath = getStorageFilePath(sessionId, fileName);
 
     if (!fs.existsSync(filePath)) {
       return new NextResponse('File Not Found', { status: 404 });

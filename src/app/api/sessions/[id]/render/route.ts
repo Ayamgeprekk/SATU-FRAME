@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { sessionStateManager } from '@/server/state-machine';
 import { renderPhotostripServer } from '@/server/server-renderer';
 import { ExportFormat, LAYOUT_PROFILES } from '@/lib/render/templates';
+import { getUploadsDir, ensureDirExists, getStorageFilePath } from '@/server/storage-helper';
 import path from 'path';
 import fs from 'fs';
 
@@ -14,19 +15,20 @@ export async function POST(
     const body = await req.json().catch(() => ({}));
     const { format = 'strip', watermark } = body;
 
-    const session = sessionStateManager.getSession(sessionId);
+    const session = (await sessionStateManager.getSessionAsync(sessionId)) || sessionStateManager.getSession(sessionId);
     if (!session) {
       return NextResponse.json({ error: 'Sesi tidak ditemukan' }, { status: 404 });
     }
 
-    const photos = sessionStateManager.getPhotos(sessionId);
-    const storageDir = path.join(process.cwd(), 'temp_uploads', sessionId);
+    const photos = await sessionStateManager.getPhotosAsync(sessionId);
+    const storageDir = getUploadsDir(sessionId);
+    ensureDirExists(storageDir);
 
     // Group photos by shot number and collect buffers for 8 slots (creator + partner)
     const photoBuffers: { slotIndex: number; buffer: Buffer }[] = [];
     for (const photo of photos) {
       const fileName = `${photo.shotNo}_${photo.participantId}.jpg`;
-      const filePath = path.join(storageDir, fileName);
+      const filePath = getStorageFilePath(sessionId, fileName);
       if (fs.existsSync(filePath)) {
         const buffer = fs.readFileSync(filePath);
         const isCreator = photo.participantId === session.creatorParticipantId;

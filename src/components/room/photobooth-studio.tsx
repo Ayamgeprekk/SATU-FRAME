@@ -247,6 +247,24 @@ export function PhotoboothStudio({
     setTimeout(() => setCopiedCode(false), 2000);
   };
 
+  // Unlock Web Audio on first user gesture anywhere
+  useEffect(() => {
+    const handleFirstGesture = () => {
+      audioRef.current?.unlock();
+    };
+    window.addEventListener('pointerdown', handleFirstGesture, { once: true });
+    window.addEventListener('touchstart', handleFirstGesture, { once: true });
+    return () => {
+      window.removeEventListener('pointerdown', handleFirstGesture);
+      window.removeEventListener('touchstart', handleFirstGesture);
+    };
+  }, []);
+
+  const handleShutterTrigger = () => {
+    audioRef.current?.unlock();
+    onStartSession();
+  };
+
   // Synchronized Countdown Loop (Tahap 1: Photobooth Shutter Experience)
   useEffect(() => {
     if (!tTargetServer) return;
@@ -261,7 +279,7 @@ export function PhotoboothStudio({
     const tLocalTrigger = tLocalTarget - deviceLagMs;
 
     const tick = () => {
-      const now = performance.now();
+      const now = Date.now();
       const timeRemaining = tLocalTarget - now;
 
       // 3-2-1 Countdown Ticks with audio synthesis
@@ -287,45 +305,85 @@ export function PhotoboothStudio({
         setIsFlashing(true);
         audioRef.current?.playShutter();
 
-        setTimeout(() => setIsFlashing(false), 120);
+        setTimeout(() => setIsFlashing(false), 150);
 
-        // Extract best frame from PreRoll buffer
+        // Attempt 1: PreRoll buffer
+        let attemptedBuffer = false;
         if (bufferRef.current) {
-          const frame = bufferRef.current.extractBestFrame(tLocalTarget);
-          if (frame) {
-            const canvas = document.createElement('canvas');
-            canvas.width = frame.bitmap.width;
-            canvas.height = frame.bitmap.height;
-            const ctx = canvas.getContext('2d');
-            if (ctx) {
-              if (activeFilterRef.current.cssFilter && activeFilterRef.current.cssFilter !== 'none') {
-                ctx.filter = activeFilterRef.current.cssFilter;
+          try {
+            const frame = bufferRef.current.extractBestFrame(tLocalTarget);
+            if (frame && frame.bitmap) {
+              attemptedBuffer = true;
+              const canvas = document.createElement('canvas');
+              canvas.width = frame.bitmap.width;
+              canvas.height = frame.bitmap.height;
+              const ctx = canvas.getContext('2d');
+              if (ctx) {
+                if (activeFilterRef.current.cssFilter && activeFilterRef.current.cssFilter !== 'none') {
+                  ctx.filter = activeFilterRef.current.cssFilter;
+                }
+                ctx.drawImage(frame.bitmap, 0, 0);
+                canvas.toBlob(
+                  (blob) => {
+                    if (blob) {
+                      const previewUrl = URL.createObjectURL(blob);
+                      setCapturedPreviewUrl(previewUrl);
+                      onCaptureCompleted(blob, frame.tFrame + offsetMs);
+                    }
+                    canvas.width = 0;
+                    canvas.height = 0;
+                    try { frame.bitmap.close(); } catch {}
+                  },
+                  'image/jpeg',
+                  0.92
+                );
               }
-              ctx.drawImage(frame.bitmap, 0, 0);
-              canvas.toBlob(
-                (blob) => {
-                  if (blob) {
-                    const previewUrl = URL.createObjectURL(blob);
-                    setCapturedPreviewUrl(previewUrl);
-                    const tFrameServerEst = frame.tFrame + offsetMs;
-                    onCaptureCompleted(blob, tFrameServerEst);
-                  }
-                  canvas.width = 0;
-                  canvas.height = 0;
-                  frame.bitmap.close();
-                },
-                'image/jpeg',
-                0.9
-              );
+            }
+          } catch (err) {
+            console.warn('PreRoll buffer extraction failed, will use video fallback:', err);
+          }
+        }
+
+        // Attempt 2: Direct video element capture fallback
+        if (!attemptedBuffer && localVideoRef.current) {
+          const video = localVideoRef.current;
+          if (video.videoWidth > 0 && video.videoHeight > 0) {
+            try {
+              const canvas = document.createElement('canvas');
+              canvas.width = video.videoWidth;
+              canvas.height = video.videoHeight;
+              const ctx = canvas.getContext('2d');
+              if (ctx) {
+                if (activeFilterRef.current.cssFilter && activeFilterRef.current.cssFilter !== 'none') {
+                  ctx.filter = activeFilterRef.current.cssFilter;
+                }
+                ctx.drawImage(video, 0, 0);
+                canvas.toBlob(
+                  (blob) => {
+                    if (blob) {
+                      const previewUrl = URL.createObjectURL(blob);
+                      setCapturedPreviewUrl(previewUrl);
+                      onCaptureCompleted(blob, Date.now() + offsetMs);
+                    }
+                    canvas.width = 0;
+                    canvas.height = 0;
+                  },
+                  'image/jpeg',
+                  0.92
+                );
+              }
+            } catch (err) {
+              console.error('Direct video fallback capture failed:', err);
             }
           }
         }
 
+        // Freeze preview on screen for 1.2 seconds, like a real photobooth
         setTimeout(() => {
           setHoldText(false);
           setCountdownNum(null);
           setCapturedPreviewUrl(null);
-        }, 800);
+        }, 1200);
       }
 
       if (!hasCaptured || timeRemaining > -1000) {
@@ -432,27 +490,28 @@ export function PhotoboothStudio({
       </div>
 
       {/* Panduan pose atau judul studio */}
-      <div className="my-2.5 text-center">
+      <div className="my-2 text-center">
         {isCountingDown ? (
-          <div className="rounded-2xl border border-teal-500/30 bg-teal-950/50 p-2.5 backdrop-blur-sm animate-in fade-in">
-            <div className="flex items-center justify-center gap-1.5 text-xs font-bold text-teal-400">
-              <Camera className="h-3.5 w-3.5 text-teal-400" />
+          <div className="rounded-2xl border border-teal-500/40 bg-teal-950/60 p-2.5 backdrop-blur-sm animate-in fade-in shadow-lg">
+            <div className="flex items-center justify-center gap-1.5 text-xs font-bold text-teal-300 font-mono">
+              <Camera className="h-3.5 w-3.5 text-teal-400 animate-pulse" />
               <span>
-                FOTO {shotNo} DARI {totalShots}
+                MEMOTRET POSE #{shotNo} DARI {totalShots}
               </span>
             </div>
-            <h3 className="text-sm sm:text-base font-bold text-white">{currentPose.title}</h3>
+            <h3 className="text-sm sm:text-base font-bold text-white mt-0.5">{currentPose.title}</h3>
             <p className="text-[11px] sm:text-xs text-zinc-300">{currentPose.desc}</p>
           </div>
         ) : (
-          <div>
-            <h1 className="text-xl sm:text-2xl font-black tracking-tight text-white">
-              Empat foto, satu strip.
-            </h1>
-            <p className="text-xs text-zinc-400">
-              {isPartnerConnected
-                ? 'Kalian sudah terhubung secara langsung. Pilih filter & mulai sesi foto!'
-                : 'Ajak pasangan atau temanmu masuk untuk foto bareng seperti di photobooth sungguhan.'}
+          <div className="rounded-2xl border border-zinc-800/80 bg-zinc-900/60 p-2.5 backdrop-blur-sm">
+            <div className="flex items-center justify-center gap-1.5 text-xs font-bold text-teal-400 font-mono">
+              <span>POSE #{shotNo} DARI {totalShots}</span>
+            </div>
+            <h2 className="text-sm sm:text-base font-bold tracking-tight text-white mt-0.5">
+              {currentPose.title}
+            </h2>
+            <p className="text-[11px] sm:text-xs text-zinc-300">
+              {currentPose.desc}
             </p>
           </div>
         )}
@@ -495,12 +554,20 @@ export function PhotoboothStudio({
           </div>
 
           {capturedPreviewUrl ? (
-            <img
-              src={capturedPreviewUrl}
-              alt="Freeze preview"
-              style={{ filter: activeFilter.cssFilter }}
-              className={isMirrored ? 'h-full w-full object-cover -scale-x-100' : 'h-full w-full object-cover'}
-            />
+            <>
+              <img
+                src={capturedPreviewUrl}
+                alt="Freeze preview"
+                style={{ filter: activeFilter.cssFilter }}
+                className={isMirrored ? 'h-full w-full object-cover -scale-x-100' : 'h-full w-full object-cover'}
+              />
+              <div className="absolute top-10 inset-x-2 z-30 flex items-center justify-center animate-in fade-in zoom-in duration-200">
+                <div className="flex items-center gap-1.5 rounded-full bg-emerald-500 px-3 py-1 text-xs font-black text-black shadow-xl">
+                  <Check className="h-3.5 w-3.5 stroke-[3]" />
+                  <span>POSE #{shotNo} TERSIMPAN!</span>
+                </div>
+              </div>
+            </>
           ) : (
             <video
               ref={localVideoRef}
@@ -725,7 +792,7 @@ export function PhotoboothStudio({
         {/* Studio Tactile Shutter Trigger */}
         <div className="pt-1">
           <button
-            onClick={onStartSession}
+            onClick={handleShutterTrigger}
             disabled={isCountingDown}
             className="btn-shutter group relative flex w-full items-center justify-center gap-3 rounded-2xl bg-gradient-to-b from-teal-500 to-teal-700 px-6 py-4 text-base font-bold text-white shadow-2xl transition hover:from-teal-400 hover:to-teal-600 active:scale-[0.97] disabled:opacity-60 min-h-[56px] border-2 border-teal-300/40"
           >

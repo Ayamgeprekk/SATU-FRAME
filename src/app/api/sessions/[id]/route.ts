@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { sessionStateManager } from '@/server/state-machine';
+import { getUploadsDir } from '@/server/storage-helper';
 import fs from 'fs';
 import path from 'path';
 
@@ -16,15 +17,15 @@ export async function GET(
     }
 
     const participants = await sessionStateManager.getParticipantsAsync(sessionId);
-    const photos = sessionStateManager.getPhotos(sessionId);
+    const photos = await sessionStateManager.getPhotosAsync(sessionId);
 
     return NextResponse.json({
       session,
       participants,
       photos,
     });
-  } catch (err: any) {
-    return NextResponse.json({ error: 'Gagal mengambil data sesi' }, { status: 500 });
+  } catch (err) {
+    return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });
   }
 }
 
@@ -34,14 +35,14 @@ export async function DELETE(
 ) {
   try {
     const sessionId = params.id;
-    const session = sessionStateManager.getSession(sessionId);
+    const session = await sessionStateManager.getSessionAsync(sessionId);
 
     if (!session) {
       return NextResponse.json({ error: 'Sesi tidak ditemukan' }, { status: 404 });
     }
 
     // Purge temporary files from disk
-    const storageDir = path.join(process.cwd(), 'temp_uploads', sessionId);
+    const storageDir = getUploadsDir(sessionId);
     if (fs.existsSync(storageDir)) {
       fs.rmSync(storageDir, { recursive: true, force: true });
     }

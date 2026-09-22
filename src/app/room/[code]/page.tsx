@@ -423,7 +423,11 @@ export default function RoomPage() {
           }
 
           if (data.scheduledCapture?.tTargetServer) {
-            setTTargetServer(data.scheduledCapture.tTargetServer);
+            if (Date.now() < data.scheduledCapture.tTargetServer + 500) {
+              setTTargetServer(data.scheduledCapture.tTargetServer);
+            } else {
+              setTTargetServer(undefined);
+            }
           } else if (data.scheduledCapture === null) {
             setTTargetServer(undefined);
           }
@@ -521,7 +525,7 @@ export default function RoomPage() {
             participantId,
             action: 'SCHEDULE_CAPTURE',
             shotNo: session.currentShotNo || 1,
-            delayMs: 3000,
+            delayMs: 3200,
           }),
         });
         if (res.ok) {
@@ -540,6 +544,7 @@ export default function RoomPage() {
   const handleCaptureCompleted = async (blob: Blob, tFrameServerEst: number) => {
     if (!session) return;
     const shotNo = session.currentShotNo;
+    setTTargetServer(undefined);
 
     const deltaMs = tTargetServer ? Math.round(Math.abs(tFrameServerEst - tTargetServer)) : 0;
     trackEvent('shot_captured', {

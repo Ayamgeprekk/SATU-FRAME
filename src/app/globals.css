@@ -1,0 +1,104 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #09090b;
+  --foreground: #fafafa;
+  --card: #18181b;
+  --card-foreground: #fafafa;
+  --primary: #005967;
+  --primary-foreground: #ffffff;
+  --accent: #ea971e;
+  --border: #27272a;
+}
+
+body {
+  color: var(--foreground);
+  background: var(--background);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
+  touch-action: manipulation;
+}
+
+/* Custom brand gradient mesh & studio atmosphere */
+.bg-romantic-glow,
+.bg-brand-glow {
+  background-image: 
+    radial-gradient(at 15% 15%, rgba(0, 89, 103, 0.28) 0px, transparent 55%),
+    radial-gradient(at 85% 80%, rgba(234, 151, 30, 0.18) 0px, transparent 55%);
+}
+
+.bg-studio-radial {
+  background-image:
+    radial-gradient(circle at 50% 0%, rgba(13, 148, 136, 0.15) 0%, transparent 60%),
+    radial-gradient(circle at 50% 100%, rgba(234, 151, 30, 0.08) 0%, transparent 50%);
+}
+
+/* Realistic physical photostrip paper depth */
+.shadow-photostrip {
+  box-shadow: 
+    0 20px 50px -10px rgba(0, 0, 0, 0.8),
+    0 0 0 1px rgba(255, 255, 255, 0.08),
+    0 1px 2px rgba(0, 0, 0, 0.4);
+}
+
+.shadow-photostrip-warm {
+  box-shadow: 
+    0 25px 60px -15px rgba(234, 151, 30, 0.15),
+    0 15px 35px -5px rgba(0, 0, 0, 0.7),
+    0 0 0 1px rgba(255, 255, 255, 0.1);
+}
+
+/* Glossy photographic paper reflection */
+.photo-glossy-glare {
+  background: linear-gradient(
+    135deg,
+    rgba(255, 255, 255, 0.16) 0%,
+    rgba(255, 255, 255, 0.04) 30%,
+    rgba(255, 255, 255, 0) 60%
+  );
+  pointer-events: none;
+}
+
+/* Physical tactile camera shutter button */
+.btn-shutter {
+  position: relative;
+  background: linear-gradient(180deg, #0d9488 0%, #005967 100%);
+  box-shadow: 0 4px 0 #003842, 0 10px 20px rgba(0, 89, 103, 0.4);
+  transition: all 120ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.btn-shutter:hover {
+  background: linear-gradient(180deg, #14b8a6 0%, #006b7a 100%);
+  transform: translateY(-1px);
+  box-shadow: 0 5px 0 #003842, 0 12px 24px rgba(0, 89, 103, 0.5);
+}
+.btn-shutter:active {
+  transform: translateY(3px);
+  box-shadow: 0 1px 0 #003842, 0 4px 10px rgba(0, 89, 103, 0.3);
+}
+
+/* Washi tape sticker detail */
+.washi-tape {
+  background: rgba(255, 255, 255, 0.18);
+  backdrop-filter: blur(4px);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+}
+
+/* Flash animation for photo capture */
+.screen-flash {
+  animation: flashEffect 160ms cubic-bezier(0.1, 0.9, 0.2, 1);
+}
+
+@keyframes flashEffect {
+  0% {
+    opacity: 0.98;
+    background-color: white;
+  }
+  100% {
+    opacity: 0;
+    background-color: transparent;
+  }
+}

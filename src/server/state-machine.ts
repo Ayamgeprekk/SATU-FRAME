@@ -11,6 +11,36 @@ export interface WebRtcSignalEnvelope {
   createdAt: number;
 }
 
+const KV_BUCKET = process.env.KV_BUCKET || 'VPL2UdYHEhvzmrYhnaYASg';
+const KV_BASE_URL = `https://kvdb.io/${KV_BUCKET}`;
+
+async function cloudSet(key: string, value: any): Promise<void> {
+  try {
+    const body = typeof value === 'string' ? value : JSON.stringify(value);
+    await fetch(`${KV_BASE_URL}/${key}`, {
+      method: 'POST',
+      body,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  } catch {}
+}
+
+async function cloudGet<T = any>(key: string): Promise<T | null> {
+  try {
+    const res = await fetch(`${KV_BASE_URL}/${key}`, { cache: 'no-store' });
+    if (!res.ok) return null;
+    const text = await res.text();
+    if (!text || text.includes('Not Found') || text.includes('invalid JSON')) return null;
+    try {
+      return JSON.parse(text) as T;
+    } catch {
+      return text as unknown as T;
+    }
+  } catch {
+    return null;
+  }
+}
+
 export class SessionStateManager {
   private sessions = new Map<string, Session>();
   private participants = new Map<string, Participant[]>();
@@ -206,6 +236,185 @@ export class SessionStateManager {
       if (s.resultToken === token) return s;
     }
     return undefined;
+  }
+
+  public async createSessionAsync(templateId = 'classic_strip'): Promise<{ session: Session; creatorToken: string }> {
+    const res = this.createSession(templateId);
+    await Promise.all([
+      cloudSet(`room_${res.session.roomCode.toUpperCase()}`, res.session.id),
+      cloudSet(`session_${res.session.id}`, res.session),
+      cloudSet(`parts_${res.session.id}`, this.participants.get(res.session.id) || []),
+    ]);
+    return res;
+  }
+
+  public async getSessionAsync(sessionId: string): Promise<Session | undefined> {
+    const s = this.getSession(sessionId);
+    if (s) return s;
+
+    const cloudSess = await cloudGet<Session>(`session_${sessionId}`);
+    if (cloudSess) {
+      this.sessions.set(sessionId, cloudSess);
+      const parts = await cloudGet<Participant[]>(`parts_${sessionId}`);
+      if (parts) {
+        this.participants.set(sessionId, parts);
+      }
+      this.saveState();
+      return cloudSess;
+    }
+    return undefined;
+  }
+
+  public async getSessionByRoomCodeAsync(code: string): Promise<Session | undefined> {
+    const s = this.getSessionByRoomCode(code);
+    if (s) return s;
+
+    const upper = code.toUpperCase().trim();
+    const sessionId = await cloudGet<string>(`room_${upper}`);
+    if (sessionId) {
+      return await this.getSessionAsync(sessionId);
+    }
+    return undefined;
+  }
+
+  public async getParticipantsAsync(sessionId: string): Promise<Participant[]> {
+    const localParts = this.getParticipants(sessionId);
+    if (localParts && localParts.length > 0) return localParts;
+
+    const cloudParts = await cloudGet<Participant[]>(`parts_${sessionId}`);
+    if (cloudParts && cloudParts.length > 0) {
+      this.participants.set(sessionId, cloudParts);
+      this.saveState();
+      return cloudParts;
+    }
+    return [];
+  }
+
+  public async joinSessionAsync(sessionId: string, displayName = 'Partner'): Promise<{ participant: Participant }> {
+    let session = await this.getSessionAsync(sessionId);
+    if (!session) throw new Error('Session not found');
+
+    const parts = (await this.getParticipantsAsync(sessionId)) || [];
+    const existingPartner = parts.find((p) => p.role === 'partner');
+
+    if (existingPartner) {
+      existingPartner.lastSeenAt = Date.now();
+      await cloudSet(`parts_${sessionId}`, parts);
+      this.saveState();
+      return { participant: existingPartner };
+    }
+
+    if (parts.length >= 2) {
+      throw new Error('Room ini sudah penuh (maksimal 2 orang)');
+    }
+
+    const partnerId = uuidv4();
+    const partner: Participant = {
+      id: partnerId,
+      sessionId,
+      role: 'partner',
+      displayName,
+      ready: false,
+      deviceLagMs: 0,
+      offsetMs: 0,
+      tabVisible: true,
+      wsRttMs: 0,
+      lastSeenAt: Date.now(),
+    };
+
+    parts.push(partner);
+    this.participants.set(sessionId, parts);
+
+    if (session.state === 'WAITING') {
+      session.state = 'CONNECTED';
+      session.connectedAt = Date.now();
+      session.stateVersion += 1;
+    }
+
+    this.saveState();
+
+    await Promise.all([
+      cloudSet(`parts_${sessionId}`, parts),
+      cloudSet(`session_${sessionId}`, session),
+    ]);
+
+    return { participant: partner };
+  }
+
+  public async addSignalAsync(
+    sessionId: string,
+    fromParticipantId: string,
+    signal: any,
+    targetParticipantId?: string
+  ): Promise<void> {
+    this.addSignal(sessionId, fromParticipantId, signal, targetParticipantId);
+    try {
+      const cloudSignals = (await cloudGet<WebRtcSignalEnvelope[]>(`signals_${sessionId}`)) || [];
+      cloudSignals.push({
+        id: uuidv4(),
+        fromParticipantId,
+        targetParticipantId,
+        signal,
+        createdAt: Date.now(),
+      });
+      await cloudSet(`signals_${sessionId}`, cloudSignals);
+    } catch {}
+  }
+
+  public async getAndClearSignalsAsync(sessionId: string, forParticipantId: string): Promise<any[]> {
+    const localSignals = this.getAndClearSignals(sessionId, forParticipantId);
+    try {
+      const cloudSignals = (await cloudGet<WebRtcSignalEnvelope[]>(`signals_${sessionId}`)) || [];
+      const forMe = cloudSignals.filter(
+        (s) =>
+          s.fromParticipantId !== forParticipantId &&
+          (!s.targetParticipantId || s.targetParticipantId === forParticipantId)
+      );
+      const remaining = cloudSignals.filter(
+        (s) =>
+          s.fromParticipantId === forParticipantId ||
+          (s.targetParticipantId && s.targetParticipantId !== forParticipantId && Date.now() - s.createdAt < 60000)
+      );
+      if (forMe.length > 0) {
+        await cloudSet(`signals_${sessionId}`, remaining);
+      }
+      return [...localSignals, ...forMe.map((s) => s.signal)];
+    } catch {
+      return localSignals;
+    }
+  }
+
+  public async scheduleCaptureAsync(
+    sessionId: string,
+    customShotNo?: number,
+    delayMs = 3000
+  ): Promise<{ tTargetServer: number; shotNo: number } | null> {
+    const sched = this.scheduleCapture(sessionId, customShotNo, delayMs);
+    if (sched) {
+      await cloudSet(`sched_${sessionId}`, sched);
+      const sess = this.sessions.get(sessionId);
+      if (sess) await cloudSet(`session_${sessionId}`, sess);
+    }
+    return sched;
+  }
+
+  public async getCaptureScheduleAsync(
+    sessionId: string
+  ): Promise<{ tTargetServer: number; shotNo: number } | null> {
+    let sched = this.getCaptureSchedule(sessionId);
+    if (sched) return sched;
+
+    sched = await cloudGet<{ tTargetServer: number; shotNo: number }>(`sched_${sessionId}`);
+    if (sched && Date.now() > sched.tTargetServer + 5000) {
+      await cloudSet(`sched_${sessionId}`, null);
+      return null;
+    }
+    return sched;
+  }
+
+  public async abortCaptureAsync(sessionId: string): Promise<void> {
+    this.abortCapture(sessionId);
+    await cloudSet(`sched_${sessionId}`, null);
   }
 
   public getAllSessions(): Session[] {

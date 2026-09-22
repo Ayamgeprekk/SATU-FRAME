@@ -10,13 +10,17 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Kode room diperlukan' }, { status: 400 });
     }
 
-    const session = sessionStateManager.getSessionByRoomCode(roomCode);
+    let session = sessionStateManager.getSessionByRoomCode(roomCode);
+    if (!session) {
+      session = await sessionStateManager.getSessionByRoomCodeAsync(roomCode);
+    }
+
     if (!session) {
       return NextResponse.json({ error: 'Room tidak ditemukan atau sudah kedaluwarsa' }, { status: 404 });
     }
 
-    const { participant } = sessionStateManager.joinSession(session.id, displayName || 'Partner');
-    const participants = sessionStateManager.getParticipants(session.id);
+    const { participant } = await sessionStateManager.joinSessionAsync(session.id, displayName || 'Partner');
+    const participants = await sessionStateManager.getParticipantsAsync(session.id);
 
     return NextResponse.json({
       session,

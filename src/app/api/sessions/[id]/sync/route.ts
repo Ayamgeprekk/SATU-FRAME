@@ -10,7 +10,7 @@ export async function GET(
     const { searchParams } = new URL(req.url);
     const participantId = searchParams.get('participantId');
 
-    const session = sessionStateManager.getSession(sessionId);
+    const session = await sessionStateManager.getSessionAsync(sessionId);
     if (!session) {
       return NextResponse.json({ error: 'Sesi tidak ditemukan' }, { status: 404 });
     }
@@ -19,11 +19,11 @@ export async function GET(
       sessionStateManager.heartbeatParticipant(sessionId, participantId);
     }
 
-    const participants = sessionStateManager.getParticipants(sessionId);
+    const participants = await sessionStateManager.getParticipantsAsync(sessionId);
     const signals = participantId
-      ? sessionStateManager.getAndClearSignals(sessionId, participantId)
+      ? await sessionStateManager.getAndClearSignalsAsync(sessionId, participantId)
       : [];
-    const scheduledCapture = sessionStateManager.getCaptureSchedule(sessionId);
+    const scheduledCapture = await sessionStateManager.getCaptureScheduleAsync(sessionId);
 
     return NextResponse.json({
       session,
@@ -46,7 +46,7 @@ export async function POST(
     const body = await req.json();
     const { participantId, action, signal, targetParticipantId, shotNo, delayMs, templateId } = body;
 
-    const session = sessionStateManager.getSession(sessionId);
+    const session = await sessionStateManager.getSessionAsync(sessionId);
     if (!session) {
       return NextResponse.json({ error: 'Sesi tidak ditemukan' }, { status: 404 });
     }
@@ -58,16 +58,16 @@ export async function POST(
     switch (action) {
       case 'SIGNAL':
         if (signal && participantId) {
-          sessionStateManager.addSignal(sessionId, participantId, signal, targetParticipantId);
+          await sessionStateManager.addSignalAsync(sessionId, participantId, signal, targetParticipantId);
         }
         break;
 
       case 'SCHEDULE_CAPTURE':
-        const target = sessionStateManager.scheduleCapture(sessionId, shotNo || 1, delayMs || 3000);
-        return NextResponse.json({ success: true, tTargetServer: target });
+        const target = await sessionStateManager.scheduleCaptureAsync(sessionId, shotNo || 1, delayMs || 3000);
+        return NextResponse.json({ success: true, tTargetServer: target?.tTargetServer });
 
       case 'ABORT_CAPTURE':
-        sessionStateManager.abortCapture(sessionId);
+        await sessionStateManager.abortCaptureAsync(sessionId);
         break;
 
       case 'SELECT_TEMPLATE':

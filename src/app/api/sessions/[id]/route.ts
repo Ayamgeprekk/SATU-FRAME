@@ -9,13 +9,13 @@ export async function GET(
 ) {
   try {
     const sessionId = params.id;
-    const session = sessionStateManager.getSession(sessionId);
+    const session = await sessionStateManager.getSessionAsync(sessionId);
 
     if (!session) {
       return NextResponse.json({ error: 'Sesi tidak ditemukan' }, { status: 404 });
     }
 
-    const participants = sessionStateManager.getParticipants(sessionId);
+    const participants = await sessionStateManager.getParticipantsAsync(sessionId);
     const photos = sessionStateManager.getPhotos(sessionId);
 
     return NextResponse.json({

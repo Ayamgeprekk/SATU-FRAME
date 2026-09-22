@@ -22,7 +22,7 @@ export async function POST(req: NextRequest) {
     const body = await req.json().catch(() => ({}));
     const templateId = body.templateId || 'classic_strip';
 
-    const { session, creatorToken } = sessionStateManager.createSession(templateId);
+    const { session, creatorToken } = await sessionStateManager.createSessionAsync(templateId);
 
     // If session was created using couple timeline quota (PRD §5.1)
     if (body.timelineId) {

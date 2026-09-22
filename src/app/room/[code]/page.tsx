@@ -49,6 +49,8 @@ export default function RoomPage() {
   const wsRef = useRef<WebSocket | null>(null);
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const timeSyncRef = useRef<TimeSyncClient | null>(null);
+  const pollingTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const [isWsConnected, setIsWsConnected] = useState(false);
 
   // Initialize camera and microphone for live peer video
   useEffect(() => {
@@ -131,6 +133,9 @@ export default function RoomPage() {
 
         const sess: Session = data.session;
         setSession(sess);
+        if (Array.isArray(data.participants)) {
+          setParticipants(data.participants);
+        }
 
         // Determine if current tab is creator or partner
         const storedToken = localStorage.getItem(`sf_token_${sess.id}`);
@@ -157,124 +162,74 @@ export default function RoomPage() {
     initRoom();
   }, [roomCode, role]);
 
-  // Connect WebSocket and NTP time synchronization
-  useEffect(() => {
-    if (!session || !participantId) return;
-
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = process.env.NEXT_PUBLIC_WS_URL || `${protocol}//${window.location.host}/ws`;
-    const ws = new WebSocket(wsUrl);
-    wsRef.current = ws;
-
-    // Initialize NTP time sync client
-    const timeSync = new TimeSyncClient(
-      (t0) => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'TIME_PING', payload: { t0 } }));
-        }
-      },
-      (offset, rtt) => {
-        setOffsetMs(offset);
-        setRttMs(rtt);
+  // WebRTC signaling dispatcher supporting WebSocket with HTTP fallback for Vercel Serverless
+  const sendSignal = useCallback(
+    async (signal: any) => {
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(
+          JSON.stringify({
+            type: 'WEBRTC_SIGNAL',
+            payload: { signal },
+          })
+        );
+        return;
       }
-    );
-    timeSyncRef.current = timeSync;
 
-    ws.onopen = () => {
-      // Join Room
-      ws.send(
-        JSON.stringify({
-          type: 'JOIN_ROOM',
-          payload: { sessionId: session.id, participantId },
-        })
-      );
-      // Start ping-pong sync
-      timeSync.startSync(8);
-      timeSync.startPeriodicSync(10000);
-    };
+      if (session?.id && participantId) {
+        try {
+          await fetch(`/api/sessions/${session.id}/sync`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              participantId,
+              action: 'SIGNAL',
+              signal,
+            }),
+          });
+        } catch (e) {
+          console.warn('HTTP sendSignal error:', e);
+        }
+      }
+    },
+    [session?.id, participantId]
+  );
 
-    ws.onmessage = async (event) => {
+  const createOffer = useCallback(async () => {
+    const pc = peerConnectionRef.current;
+    if (!pc || role !== 'creator') return;
+    try {
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      sendSignal({ offer });
+    } catch (e) {
+      console.warn('createOffer error:', e);
+    }
+  }, [role, sendSignal]);
+
+  const handleWebRtcSignal = useCallback(
+    async (signal: any) => {
+      const pc = peerConnectionRef.current;
+      if (!pc) return;
+
       try {
-        const msg = JSON.parse(event.data);
-        const { type, payload } = msg;
-
-        switch (type) {
-          case 'TIME_PONG':
-            timeSync.handlePong(payload.t0, payload.ts);
-            break;
-
-          case 'STATE_SNAPSHOT':
-            if (payload.session) setSession(payload.session);
-            if (payload.participants) setParticipants(payload.participants);
-            if (payload.photos) setPhotos(payload.photos);
-            break;
-
-          case 'PRESENCE':
-            if (payload.participants) {
-              setParticipants(payload.participants);
-              // If creator and partner just showed up, create offer
-              if (role === 'creator' && payload.participants.length >= 2) {
-                createOffer();
-              }
-            }
-            if (payload.session) setSession(payload.session);
-            break;
-
-          case 'SCHEDULE_CAPTURE':
-            setTTargetServer(payload.tTargetServer);
-            trackEvent('ready_both', { sessionId: session?.id, participantId });
-            break;
-
-          case 'CAPTURE_ABORT':
-            setTTargetServer(undefined);
-            if (payload.session) setSession(payload.session);
-            if (payload.participants) setParticipants(payload.participants);
-            break;
-
-          case 'WEBRTC_SIGNAL':
-            handleWebRtcSignal(payload.signal);
-            break;
+        if (signal.offer) {
+          await pc.setRemoteDescription(new RTCSessionDescription(signal.offer));
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          sendSignal({ answer });
+        } else if (signal.answer) {
+          await pc.setRemoteDescription(new RTCSessionDescription(signal.answer));
+        } else if (signal.candidate) {
+          await pc.addIceCandidate(new RTCIceCandidate(signal.candidate));
         }
       } catch (err) {
-        console.error('WS message error:', err);
+        console.warn('WebRTC signal handling error:', err);
       }
-    };
+    },
+    [sendSignal]
+  );
 
-    ws.onclose = () => {
-      timeSync.stopPeriodicSync();
-    };
-
-    return () => {
-      ws.close();
-      timeSync.stopPeriodicSync();
-    };
-  }, [session?.id, participantId, role]);
-
-  // 4. Partner Join Notification Banner
-  useEffect(() => {
-    if (participants.length >= 2 && prevPartsLenRef.current < 2) {
-      setJustJoinedBanner(true);
-      const timer = setTimeout(() => setJustJoinedBanner(false), 5000);
-      return () => clearTimeout(timer);
-    }
-    prevPartsLenRef.current = participants.length;
-  }, [participants.length]);
-
-  // 5. Countdown timer for remaining session time
-  useEffect(() => {
-    if (!session?.expiresAt) return;
-    const updateTimer = () => {
-      const diff = Math.max(0, session.expiresAt - Date.now());
-      const mins = Math.floor(diff / 60000);
-      const secs = Math.floor((diff % 60000) / 1000);
-      setTimeRemainingStr(`${mins}:${secs < 10 ? '0' : ''}${secs}`);
-    };
-    updateTimer();
-    const interval = setInterval(updateTimer, 1000);
-    return () => clearInterval(interval);
-  }, [session?.expiresAt]);
-
-  // 6. WebRTC P2P Video Call Setup
+  // WebRTC PeerConnection initialization
   const initWebRtc = useCallback(
     async (stream: MediaStream) => {
       if (peerConnectionRef.current) return;
@@ -315,76 +270,18 @@ export default function RoomPage() {
       };
 
       pc.onicecandidate = (event) => {
-        if (event.candidate && wsRef.current?.readyState === WebSocket.OPEN) {
-          wsRef.current.send(
-            JSON.stringify({
-              type: 'WEBRTC_SIGNAL',
-              payload: { signal: { candidate: event.candidate } },
-            })
-          );
+        if (event.candidate) {
+          sendSignal({ candidate: event.candidate });
         }
       };
 
       // If creator and partner already present, create offer immediately
       if (role === 'creator' && participants.length >= 2) {
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-          wsRef.current.send(
-            JSON.stringify({
-              type: 'WEBRTC_SIGNAL',
-              payload: { signal: { offer } },
-            })
-          );
-        }
+        createOffer();
       }
     },
-    [role, participants.length]
+    [role, participants.length, sendSignal, createOffer]
   );
-
-  const createOffer = async () => {
-    const pc = peerConnectionRef.current;
-    if (!pc || role !== 'creator') return;
-    try {
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(
-          JSON.stringify({
-            type: 'WEBRTC_SIGNAL',
-            payload: { signal: { offer } },
-          })
-        );
-      }
-    } catch (e) {
-      console.warn('createOffer error:', e);
-    }
-  };
-
-  const handleWebRtcSignal = async (signal: any) => {
-    const pc = peerConnectionRef.current;
-    if (!pc) return;
-
-    if (signal.offer) {
-      await pc.setRemoteDescription(new RTCSessionDescription(signal.offer));
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(
-          JSON.stringify({
-            type: 'WEBRTC_SIGNAL',
-            payload: { signal: { answer } },
-          })
-        );
-      }
-    } else if (signal.answer) {
-      await pc.setRemoteDescription(new RTCSessionDescription(signal.answer));
-    } else if (signal.candidate) {
-      try {
-        await pc.addIceCandidate(new RTCIceCandidate(signal.candidate));
-      } catch {}
-    }
-  };
 
   // Start WebRTC when localStream is ready
   useEffect(() => {
@@ -393,8 +290,185 @@ export default function RoomPage() {
     }
   }, [localStream, initWebRtc]);
 
-  // 7. Handle Template Selection (Realtime sync)
-  const handleSelectTemplate = (templateId: string) => {
+  // Connect WebSocket and NTP time synchronization
+  useEffect(() => {
+    if (!session || !participantId) return;
+
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = process.env.NEXT_PUBLIC_WS_URL || `${protocol}//${window.location.host}/ws`;
+    const ws = new WebSocket(wsUrl);
+    wsRef.current = ws;
+
+    // Initialize NTP time sync client
+    const timeSync = new TimeSyncClient(
+      (t0) => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'TIME_PING', payload: { t0 } }));
+        }
+      },
+      (offset, rtt) => {
+        setOffsetMs(offset);
+        setRttMs(rtt);
+      }
+    );
+    timeSyncRef.current = timeSync;
+
+    ws.onopen = () => {
+      setIsWsConnected(true);
+      // Join Room
+      ws.send(
+        JSON.stringify({
+          type: 'JOIN_ROOM',
+          payload: { sessionId: session.id, participantId },
+        })
+      );
+      // Start ping-pong sync
+      timeSync.startSync(8);
+      timeSync.startPeriodicSync(10000);
+    };
+
+    ws.onerror = () => {
+      setIsWsConnected(false);
+    };
+
+    ws.onmessage = async (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        const { type, payload } = msg;
+
+        switch (type) {
+          case 'TIME_PONG':
+            timeSync.handlePong(payload.t0, payload.ts);
+            break;
+
+          case 'STATE_SNAPSHOT':
+            if (payload.session) setSession(payload.session);
+            if (payload.participants) setParticipants(payload.participants);
+            if (payload.photos) setPhotos(payload.photos);
+            break;
+
+          case 'PRESENCE':
+            if (payload.participants) {
+              setParticipants(payload.participants);
+              if (role === 'creator' && payload.participants.length >= 2) {
+                createOffer();
+              }
+            }
+            if (payload.session) setSession(payload.session);
+            break;
+
+          case 'SCHEDULE_CAPTURE':
+            setTTargetServer(payload.tTargetServer);
+            trackEvent('ready_both', { sessionId: session?.id, participantId });
+            break;
+
+          case 'CAPTURE_ABORT':
+            setTTargetServer(undefined);
+            if (payload.session) setSession(payload.session);
+            if (payload.participants) setParticipants(payload.participants);
+            break;
+
+          case 'WEBRTC_SIGNAL':
+            handleWebRtcSignal(payload.signal);
+            break;
+        }
+      } catch (err) {
+        console.error('WS message error:', err);
+      }
+    };
+
+    ws.onclose = () => {
+      setIsWsConnected(false);
+      timeSync.stopPeriodicSync();
+    };
+
+    return () => {
+      ws.close();
+      timeSync.stopPeriodicSync();
+    };
+  }, [session?.id, participantId, role, createOffer, handleWebRtcSignal]);
+
+  // HTTP Polling Fallback & Heartbeat (Active on Vercel Serverless or when WS disconnects)
+  useEffect(() => {
+    if (!session?.id || !participantId) return;
+
+    let isPolling = true;
+
+    async function syncPoll() {
+      const intervalMs = isWsConnected ? 4000 : 1200;
+
+      try {
+        const res = await fetch(`/api/sessions/${session?.id}/sync?participantId=${participantId}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (!isPolling) return;
+
+          if (data.session) setSession(data.session);
+          if (Array.isArray(data.participants)) {
+            setParticipants(data.participants);
+            if (
+              role === 'creator' &&
+              data.participants.length >= 2 &&
+              !remoteStream &&
+              !peerConnectionRef.current?.remoteDescription
+            ) {
+              createOffer();
+            }
+          }
+
+          if (Array.isArray(data.signals) && data.signals.length > 0) {
+            for (const sig of data.signals) {
+              handleWebRtcSignal(sig);
+            }
+          }
+
+          if (data.scheduledCapture?.tTargetServer) {
+            setTTargetServer(data.scheduledCapture.tTargetServer);
+          } else if (data.scheduledCapture === null) {
+            setTTargetServer(undefined);
+          }
+        }
+      } catch {}
+
+      if (isPolling) {
+        pollingTimerRef.current = setTimeout(syncPoll, intervalMs);
+      }
+    }
+
+    syncPoll();
+
+    return () => {
+      isPolling = false;
+      if (pollingTimerRef.current) clearTimeout(pollingTimerRef.current);
+    };
+  }, [session?.id, participantId, isWsConnected, role, remoteStream, createOffer, handleWebRtcSignal]);
+
+  // Partner Join Notification Banner
+  useEffect(() => {
+    if (participants.length >= 2 && prevPartsLenRef.current < 2) {
+      setJustJoinedBanner(true);
+      const timer = setTimeout(() => setJustJoinedBanner(false), 5000);
+      return () => clearTimeout(timer);
+    }
+    prevPartsLenRef.current = participants.length;
+  }, [participants.length]);
+
+  // Countdown timer for remaining session time
+  useEffect(() => {
+    if (!session?.expiresAt) return;
+    const updateTimer = () => {
+      const diff = Math.max(0, session.expiresAt - Date.now());
+      const mins = Math.floor(diff / 60000);
+      const secs = Math.floor((diff % 60000) / 1000);
+      setTimeRemainingStr(`${mins}:${secs < 10 ? '0' : ''}${secs}`);
+    };
+    updateTimer();
+    const interval = setInterval(updateTimer, 1000);
+    return () => clearInterval(interval);
+  }, [session?.expiresAt]);
+
+  // Handle Template Selection
+  const handleSelectTemplate = async (templateId: string) => {
     if (!session) return;
     setSession((prev) => (prev ? { ...prev, templateId } : null));
 
@@ -405,26 +479,61 @@ export default function RoomPage() {
           payload: { sessionId: session.id, templateId },
         })
       );
+    } else {
+      try {
+        await fetch(`/api/sessions/${session.id}/sync`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            participantId,
+            action: 'SELECT_TEMPLATE',
+            templateId,
+          }),
+        });
+      } catch {}
     }
   };
 
-  // 8. Handle "Mulai Sesi" Click (Triggers Ready Gate & Countdown)
-  const handleStartSession = () => {
-    if (!session || wsRef.current?.readyState !== WebSocket.OPEN) return;
+  // Handle "Mulai Sesi" Click (Triggers Ready Gate & Countdown)
+  const handleStartSession = async () => {
+    if (!session) return;
 
-    wsRef.current.send(
-      JSON.stringify({
-        type: 'READY',
-        payload: {
-          ready: true,
-          deviceLagMs: calibration?.medianLagMs || 50,
-          activeCaptureMode: calibration?.activeCaptureMode || 'grab',
-          offsetMs,
-          wsRttMs: rttMs,
-          tabVisible: !document.hidden,
-        },
-      })
-    );
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          type: 'READY',
+          payload: {
+            ready: true,
+            deviceLagMs: calibration?.medianLagMs || 50,
+            activeCaptureMode: calibration?.activeCaptureMode || 'grab',
+            offsetMs,
+            wsRttMs: rttMs,
+            tabVisible: !document.hidden,
+          },
+        })
+      );
+    } else {
+      try {
+        const res = await fetch(`/api/sessions/${session.id}/sync`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            participantId,
+            action: 'SCHEDULE_CAPTURE',
+            shotNo: session.currentShotNo || 1,
+            delayMs: 3000,
+          }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.tTargetServer) {
+            setTTargetServer(data.tTargetServer);
+          }
+        }
+      } catch (err) {
+        console.warn('Failed to schedule capture via HTTP:', err);
+      }
+    }
   };
 
   // 9. Handle Photo Shot Captured (IndexedDB Write-Ahead + Commit)
@@ -555,14 +664,29 @@ export default function RoomPage() {
     }
   };
 
-  const handleAbortCapture = (reason: string) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN && session) {
+  const handleAbortCapture = async (reason: string) => {
+    setTTargetServer(undefined);
+    if (!session) return;
+
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(
         JSON.stringify({
           type: 'CAPTURE_ABORT',
           payload: { sessionId: session.id, participantId, reason },
         })
       );
+    } else {
+      try {
+        await fetch(`/api/sessions/${session.id}/sync`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            participantId,
+            action: 'ABORT_CAPTURE',
+            reason,
+          }),
+        });
+      } catch {}
     }
   };
 

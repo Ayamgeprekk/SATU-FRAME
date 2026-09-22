@@ -1,5 +1,15 @@
 import { Session, SessionState, Participant, SessionPhoto } from '@/types/session';
 import { v4 as uuidv4 } from 'uuid';
+import fs from 'fs';
+import path from 'path';
+
+export interface WebRtcSignalEnvelope {
+  id: string;
+  fromParticipantId: string;
+  targetParticipantId?: string;
+  signal: any;
+  createdAt: number;
+}
 
 export class SessionStateManager {
   private sessions = new Map<string, Session>();
@@ -7,6 +17,112 @@ export class SessionStateManager {
   private photos = new Map<string, SessionPhoto[]>();
   private eventLogs = new Map<string, any[]>();
   private reconnectTimers = new Map<string, NodeJS.Timeout>();
+  private signals = new Map<string, WebRtcSignalEnvelope[]>();
+  private captureSchedules = new Map<string, { tTargetServer: number; shotNo: number } | null>();
+
+  constructor() {
+    this.loadState();
+  }
+
+  private getStorageFilePath(): string {
+    const isVercel = process.env.VERCEL === '1' || !!process.env.AWS_LAMBDA_FUNCTION_NAME;
+    const dir = isVercel ? '/tmp' : path.join(process.cwd(), 'temp_uploads');
+    if (!fs.existsSync(dir)) {
+      try {
+        fs.mkdirSync(dir, { recursive: true });
+      } catch {}
+    }
+    return path.join(dir, 'sf_sessions_state.json');
+  }
+
+  private saveState(): void {
+    try {
+      const data = {
+        sessions: Array.from(this.sessions.entries()),
+        participants: Array.from(this.participants.entries()),
+        photos: Array.from(this.photos.entries()),
+        signals: Array.from(this.signals.entries()),
+        captureSchedules: Array.from(this.captureSchedules.entries()),
+      };
+      fs.writeFileSync(this.getStorageFilePath(), JSON.stringify(data), 'utf-8');
+    } catch {}
+  }
+
+  private loadState(): void {
+    try {
+      const filePath = this.getStorageFilePath();
+      if (fs.existsSync(filePath)) {
+        const raw = fs.readFileSync(filePath, 'utf-8');
+        const data = JSON.parse(raw);
+        if (data.sessions) this.sessions = new Map(data.sessions);
+        if (data.participants) this.participants = new Map(data.participants);
+        if (data.photos) this.photos = new Map(data.photos);
+        if (data.signals) this.signals = new Map(data.signals);
+        if (data.captureSchedules) this.captureSchedules = new Map(data.captureSchedules);
+      }
+    } catch {}
+  }
+
+  public addSignal(sessionId: string, fromParticipantId: string, signal: any, targetParticipantId?: string): void {
+    this.loadState();
+    const list = this.signals.get(sessionId) || [];
+    list.push({
+      id: uuidv4(),
+      fromParticipantId,
+      targetParticipantId,
+      signal,
+      createdAt: Date.now(),
+    });
+    this.signals.set(sessionId, list);
+    this.saveState();
+  }
+
+  public getAndClearSignals(sessionId: string, forParticipantId: string): any[] {
+    this.loadState();
+    const list = this.signals.get(sessionId) || [];
+    const forMe = list.filter(
+      (s) =>
+        s.fromParticipantId !== forParticipantId &&
+        (!s.targetParticipantId || s.targetParticipantId === forParticipantId)
+    );
+    const remaining = list.filter(
+      (s) =>
+        s.fromParticipantId === forParticipantId ||
+        (s.targetParticipantId && s.targetParticipantId !== forParticipantId && Date.now() - s.createdAt < 60000)
+    );
+    this.signals.set(sessionId, remaining);
+    this.saveState();
+    return forMe.map((s) => s.signal);
+  }
+
+  public abortCapture(sessionId: string): void {
+    this.loadState();
+    this.captureSchedules.set(sessionId, null);
+    this.saveState();
+  }
+
+  public getCaptureSchedule(sessionId: string): { tTargetServer: number; shotNo: number } | null {
+    this.loadState();
+    const sched = this.captureSchedules.get(sessionId) || null;
+    if (sched && Date.now() > sched.tTargetServer + 5000) {
+      this.captureSchedules.set(sessionId, null);
+      this.saveState();
+      return null;
+    }
+    return sched;
+  }
+
+  public heartbeatParticipant(sessionId: string, participantId: string): void {
+    this.loadState();
+    const parts = this.participants.get(sessionId);
+    if (parts) {
+      const p = parts.find((item) => item.id === participantId);
+      if (p) {
+        p.lastSeenAt = Date.now();
+        this.saveState();
+      }
+    }
+  }
 
   /**
    * Create a new session (Guest creator)
@@ -60,15 +176,22 @@ export class SessionStateManager {
     this.participants.set(sessionId, [creator]);
     this.photos.set(sessionId, []);
     this.eventLogs.set(sessionId, []);
+    this.saveState();
 
     return { session, creatorToken: creatorId };
   }
 
   public getSession(sessionId: string): Session | undefined {
-    return this.sessions.get(sessionId);
+    let s = this.sessions.get(sessionId);
+    if (!s) {
+      this.loadState();
+      s = this.sessions.get(sessionId);
+    }
+    return s;
   }
 
   public getSessionByRoomCode(code: string): Session | undefined {
+    this.loadState();
     const upper = code.toUpperCase().trim();
     for (const s of this.sessions.values()) {
       if (s.roomCode === upper && s.state !== 'EXPIRED' && s.state !== 'CANCELLED') {
@@ -118,7 +241,12 @@ export class SessionStateManager {
   }
 
   public getParticipants(sessionId: string): Participant[] {
-    return this.participants.get(sessionId) || [];
+    let p = this.participants.get(sessionId);
+    if (!p || p.length === 0) {
+      this.loadState();
+      p = this.participants.get(sessionId);
+    }
+    return p || [];
   }
 
   public getPhotos(sessionId: string): SessionPhoto[] {
@@ -126,10 +254,15 @@ export class SessionStateManager {
   }
 
   public updateTemplate(sessionId: string, templateId: string): Session | undefined {
-    const session = this.sessions.get(sessionId);
+    let session = this.sessions.get(sessionId);
+    if (!session) {
+      this.loadState();
+      session = this.sessions.get(sessionId);
+    }
     if (!session) return undefined;
     session.templateId = templateId;
     session.stateVersion += 1;
+    this.saveState();
     return session;
   }
 
@@ -137,7 +270,11 @@ export class SessionStateManager {
    * Partner joins session
    */
   public joinSession(sessionId: string, displayName = 'Partner'): { participant: Participant } {
-    const session = this.sessions.get(sessionId);
+    let session = this.sessions.get(sessionId);
+    if (!session) {
+      this.loadState();
+      session = this.sessions.get(sessionId);
+    }
     if (!session) throw new Error('Session not found');
 
     const parts = this.participants.get(sessionId) || [];
@@ -145,6 +282,7 @@ export class SessionStateManager {
 
     if (existingPartner) {
       existingPartner.lastSeenAt = Date.now();
+      this.saveState();
       return { participant: existingPartner };
     }
 
@@ -176,6 +314,7 @@ export class SessionStateManager {
       session.stateVersion += 1;
     }
 
+    this.saveState();
     return { participant: partner };
   }
 
@@ -221,19 +360,26 @@ export class SessionStateManager {
   /**
    * Schedule countdown capture
    */
-  public scheduleCapture(sessionId: string): { tTargetServer: number; shotNo: number } | null {
+  public scheduleCapture(
+    sessionId: string,
+    customShotNo?: number,
+    delayMs = 3000
+  ): { tTargetServer: number; shotNo: number } | null {
+    this.loadState();
     const session = this.sessions.get(sessionId);
-    if (!session || session.state !== 'READY') return null;
+    if (!session) return null;
 
-    // 8 second lead time (Pose Guide 5s + 3-2-1 Countdown 3s)
-    const leadTimeMs = 8000;
-    const tTargetServer = Date.now() + leadTimeMs;
+    const tTargetServer = Date.now() + delayMs;
+    const shotNo = customShotNo || session.currentShotNo || 1;
 
     session.state = 'COUNTDOWN';
     session.targetCaptureTime = tTargetServer;
     session.stateVersion += 1;
 
-    return { tTargetServer, shotNo: session.currentShotNo };
+    this.captureSchedules.set(sessionId, { tTargetServer, shotNo });
+    this.saveState();
+
+    return { tTargetServer, shotNo };
   }
 
   /**

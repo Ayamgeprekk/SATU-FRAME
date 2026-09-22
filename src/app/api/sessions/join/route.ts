@@ -16,11 +16,13 @@ export async function POST(req: NextRequest) {
     }
 
     const { participant } = sessionStateManager.joinSession(session.id, displayName || 'Partner');
+    const participants = sessionStateManager.getParticipants(session.id);
 
     return NextResponse.json({
       session,
       participant,
       participantToken: participant.id,
+      participants,
     });
   } catch (err: any) {
     return NextResponse.json({ error: err.message || 'Gagal bergabung' }, { status: 400 });

@@ -3,6 +3,31 @@ import { sessionStateManager } from '@/server/state-machine';
 import fs from 'fs';
 import path from 'path';
 
+export async function GET(
+  req: NextRequest,
+  { params }: { params: { id: string } }
+) {
+  try {
+    const sessionId = params.id;
+    const session = sessionStateManager.getSession(sessionId);
+
+    if (!session) {
+      return NextResponse.json({ error: 'Sesi tidak ditemukan' }, { status: 404 });
+    }
+
+    const participants = sessionStateManager.getParticipants(sessionId);
+    const photos = sessionStateManager.getPhotos(sessionId);
+
+    return NextResponse.json({
+      session,
+      participants,
+      photos,
+    });
+  } catch (err: any) {
+    return NextResponse.json({ error: 'Gagal mengambil data sesi' }, { status: 500 });
+  }
+}
+
 export async function DELETE(
   req: NextRequest,
   { params }: { params: { id: string } }

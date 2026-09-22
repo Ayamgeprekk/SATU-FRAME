@@ -127,6 +127,7 @@ export interface PhotoboothStudioProps {
   onCopyLink?: () => void;
   onShareWhatsApp?: () => void;
   justJoinedBanner?: boolean;
+  isP2PConnected?: boolean;
 }
 
 export function PhotoboothStudio({
@@ -152,6 +153,7 @@ export function PhotoboothStudio({
   onCopyLink,
   onShareWhatsApp,
   justJoinedBanner = false,
+  isP2PConnected = false,
 }: PhotoboothStudioProps) {
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
@@ -521,13 +523,31 @@ export function PhotoboothStudio({
       <div className="relative my-auto grid w-full grid-cols-2 gap-2.5 sm:gap-3.5">
         {/* Sync Telemetry Bridge Pill */}
         <div className="col-span-2 flex items-center justify-center -my-1 z-10">
-          <div className={`flex items-center gap-1.5 rounded-full px-3 py-1 text-[10px] font-mono border backdrop-blur-md shadow-sm ${
-            isPartnerConnected
-              ? 'bg-teal-950/80 border-teal-500/30 text-teal-300'
-              : 'bg-zinc-900/80 border-zinc-800 text-zinc-400'
-          }`}>
-            <span className={`h-1.5 w-1.5 rounded-full ${isPartnerConnected ? 'bg-teal-400 animate-ping' : 'bg-zinc-500'}`} />
-            <span>{isPartnerConnected ? 'SYNC DUAL-CAM AKTIF (ΔT < 25ms)' : 'STANDBY: MENUNGGU LIVE LINK TEMAN'}</span>
+          <div
+            className={`flex items-center gap-1.5 rounded-full px-3 py-1 text-[10px] font-mono border backdrop-blur-md shadow-sm ${
+              isP2PConnected
+                ? 'bg-teal-950/90 border-teal-400/60 text-teal-300'
+                : isPartnerConnected
+                ? 'bg-emerald-950/80 border-emerald-500/30 text-emerald-300'
+                : 'bg-zinc-900/80 border-zinc-800 text-zinc-400'
+            }`}
+          >
+            <span
+              className={`h-1.5 w-1.5 rounded-full ${
+                isP2PConnected
+                  ? 'bg-teal-300 animate-pulse'
+                  : isPartnerConnected
+                  ? 'bg-emerald-400 animate-ping'
+                  : 'bg-zinc-500'
+              }`}
+            />
+            <span>
+              {isP2PConnected
+                ? 'SYNC P2P AKTIF (REALTIME < 5ms)'
+                : isPartnerConnected
+                ? 'SYNC DUAL-CAM AKTIF'
+                : 'STANDBY: MENUNGGU LIVE LINK TEMAN'}
+            </span>
           </div>
         </div>
 

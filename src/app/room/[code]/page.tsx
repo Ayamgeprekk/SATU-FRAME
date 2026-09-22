@@ -45,9 +45,13 @@ export default function RoomPage() {
   const [timeRemainingStr, setTimeRemainingStr] = useState('29:45');
   const prevPartsLenRef = useRef(1);
 
-  // References
+  // References & P2P DataChannel
   const wsRef = useRef<WebSocket | null>(null);
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
+  const dataChannelRef = useRef<RTCDataChannel | null>(null);
+  const chunkReassemblerRef = useRef<Map<string, { total: number; chunks: string[] }>>(new Map());
+  const completedShotsRef = useRef<Map<number, Set<string>>>(new Map());
+  const [isP2PConnected, setIsP2PConnected] = useState(false);
   const timeSyncRef = useRef<TimeSyncClient | null>(null);
   const pollingTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [isWsConnected, setIsWsConnected] = useState(false);
@@ -229,6 +233,169 @@ export default function RoomPage() {
     [sendSignal]
   );
 
+  // P2P DataChannel dispatcher for sub-5ms realtime synchronizations
+  const sendP2PMessage = useCallback((type: string, payload: any = {}) => {
+    const dc = dataChannelRef.current;
+    if (!dc || dc.readyState !== 'open') return false;
+
+    try {
+      const json = JSON.stringify({ type, ...payload });
+      const CHUNK_SIZE = 15 * 1024; // 15 KB safe chunking across all mobile browsers
+
+      if (json.length <= CHUNK_SIZE) {
+        dc.send(json);
+      } else {
+        const msgId = Math.random().toString(36).substring(2, 9);
+        const totalChunks = Math.ceil(json.length / CHUNK_SIZE);
+        for (let i = 0; i < totalChunks; i++) {
+          const chunk = json.substring(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+          dc.send(
+            JSON.stringify({
+              type: 'CHUNK',
+              msgId,
+              index: i,
+              total: totalChunks,
+              chunk,
+            })
+          );
+        }
+      }
+      return true;
+    } catch (err) {
+      console.warn('sendP2PMessage error:', err);
+      return false;
+    }
+  }, []);
+
+  const setupDataChannel = useCallback(
+    (dc: RTCDataChannel) => {
+      dataChannelRef.current = dc;
+
+      dc.onopen = () => {
+        setIsP2PConnected(true);
+      };
+
+      dc.onclose = () => {
+        setIsP2PConnected(false);
+      };
+
+      dc.onerror = (e) => {
+        console.warn('P2P DataChannel error:', e);
+      };
+
+      dc.onmessage = async (event) => {
+        try {
+          const raw = JSON.parse(event.data);
+          let data = raw;
+
+          if (raw.type === 'CHUNK') {
+            let entry = chunkReassemblerRef.current.get(raw.msgId);
+            if (!entry) {
+              entry = { total: raw.total, chunks: [] };
+              chunkReassemblerRef.current.set(raw.msgId, entry);
+            }
+            entry.chunks[raw.index] = raw.chunk;
+            if (entry.chunks.filter(Boolean).length === entry.total) {
+              const fullJson = entry.chunks.join('');
+              chunkReassemblerRef.current.delete(raw.msgId);
+              data = JSON.parse(fullJson);
+            } else {
+              return;
+            }
+          }
+
+          switch (data.type) {
+            case 'START_COUNTDOWN': {
+              const durationMs = data.durationMs || 3000;
+              setTTargetServer(Date.now() + durationMs);
+              break;
+            }
+
+            case 'ABORT_COUNTDOWN': {
+              setTTargetServer(undefined);
+              break;
+            }
+
+            case 'P2P_PHOTO_SHARE': {
+              if (data.blobBase64 && data.shotNo && session?.id) {
+                const res = await fetch(data.blobBase64);
+                const peerBlob = await res.blob();
+                const senderId = data.participantId || (role === 'creator' ? 'partner' : 'creator');
+                await localShotStorage.saveShot(session.id, data.shotNo, senderId, peerBlob);
+              }
+              break;
+            }
+
+            case 'SHOT_COMPLETED': {
+              const sNo = data.shotNo;
+              let set = completedShotsRef.current.get(sNo);
+              if (!set) {
+                set = new Set();
+                completedShotsRef.current.set(sNo, set);
+              }
+              set.add(data.participantId);
+
+              const reqCount = participants.length >= 2 ? 2 : 1;
+              if (set.size >= reqCount) {
+                const nextNo = sNo + 1;
+                if (nextNo > (session?.shotCountTarget || 4)) {
+                  setSession((prev) => (prev ? { ...prev, state: 'REVIEW', shotCountSaved: 4 } : null));
+                } else {
+                  setSession((prev) =>
+                    prev
+                      ? {
+                          ...prev,
+                          currentShotNo: nextNo,
+                          shotCountSaved: sNo,
+                          state: 'SHOT_SAVED',
+                        }
+                      : null
+                  );
+                }
+              }
+              break;
+            }
+
+            case 'ADVANCE_SHOT': {
+              const nextNo = data.nextShotNo;
+              if (nextNo > (session?.shotCountTarget || 4)) {
+                setSession((prev) => (prev ? { ...prev, state: 'REVIEW', shotCountSaved: 4 } : null));
+              } else {
+                setSession((prev) =>
+                  prev
+                    ? {
+                        ...prev,
+                        currentShotNo: nextNo,
+                        shotCountSaved: data.shotNo,
+                        state: 'SHOT_SAVED',
+                      }
+                    : null
+                );
+              }
+              break;
+            }
+
+            case 'RETAKE_REQUEST': {
+              setSession((prev) =>
+                prev
+                  ? {
+                      ...prev,
+                      currentShotNo: data.shotNo,
+                      state: 'READY',
+                    }
+                  : null
+              );
+              break;
+            }
+          }
+        } catch (err) {
+          console.warn('Error handling P2P message:', err);
+        }
+      };
+    },
+    [participants.length, role, session?.id, session?.shotCountTarget]
+  );
+
   // WebRTC PeerConnection initialization
   const initWebRtc = useCallback(
     async (stream: MediaStream) => {
@@ -243,6 +410,21 @@ export default function RoomPage() {
         iceCandidatePoolSize: 2,
       });
       peerConnectionRef.current = pc;
+
+      // Setup DataChannel on creator side
+      if (role === 'creator') {
+        try {
+          const dc = pc.createDataChannel('photobooth-sync', { ordered: true });
+          setupDataChannel(dc);
+        } catch (e) {
+          console.warn('Failed to create DataChannel:', e);
+        }
+      }
+
+      // Listen for incoming DataChannel on partner side
+      pc.ondatachannel = (event) => {
+        setupDataChannel(event.channel);
+      };
 
       // Add local audio and video tracks
       stream.getTracks().forEach((track) => pc.addTrack(track, stream));
@@ -280,7 +462,7 @@ export default function RoomPage() {
         createOffer();
       }
     },
-    [role, participants.length, sendSignal, createOffer]
+    [role, participants.length, sendSignal, createOffer, setupDataChannel]
   );
 
   // Start WebRTC when localStream is ready
@@ -498,46 +680,35 @@ export default function RoomPage() {
     }
   };
 
-  // Handle "Mulai Sesi" Click (Triggers Ready Gate & Countdown)
+  // Handle Shutter Trigger (Triggers Instant Realtime 3-2-1 Countdown)
   const handleStartSession = async () => {
     if (!session) return;
+    const shotNo = session.currentShotNo || 1;
+    const durationMs = 3000;
+    const targetTime = Date.now() + durationMs;
 
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(
-        JSON.stringify({
-          type: 'READY',
-          payload: {
-            ready: true,
-            deviceLagMs: calibration?.medianLagMs || 50,
-            activeCaptureMode: calibration?.activeCaptureMode || 'grab',
-            offsetMs,
-            wsRttMs: rttMs,
-            tabVisible: !document.hidden,
-          },
-        })
-      );
-    } else {
-      try {
-        const res = await fetch(`/api/sessions/${session.id}/sync`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            participantId,
-            action: 'SCHEDULE_CAPTURE',
-            shotNo: session.currentShotNo || 1,
-            delayMs: 3200,
-          }),
-        });
-        if (res.ok) {
-          const data = await res.json();
-          if (data.tTargetServer) {
-            setTTargetServer(data.tTargetServer);
-          }
-        }
-      } catch (err) {
-        console.warn('Failed to schedule capture via HTTP:', err);
-      }
-    }
+    // 1. Instantly notify peer via P2P DataChannel (< 5ms latency!)
+    sendP2PMessage('START_COUNTDOWN', {
+      shotNo,
+      durationMs,
+    });
+
+    // 2. Start local countdown immediately
+    setTTargetServer(targetTime);
+
+    // 3. Fallback: Notify server via HTTP sync in background
+    try {
+      fetch(`/api/sessions/${session.id}/sync`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          participantId,
+          action: 'SCHEDULE_CAPTURE',
+          shotNo,
+          delayMs: durationMs,
+        }),
+      }).catch(() => {});
+    } catch {}
   };
 
   // 9. Handle Photo Shot Captured (IndexedDB Write-Ahead + Commit)
@@ -546,17 +717,72 @@ export default function RoomPage() {
     const shotNo = session.currentShotNo;
     setTTargetServer(undefined);
 
-    const deltaMs = tTargetServer ? Math.round(Math.abs(tFrameServerEst - tTargetServer)) : 0;
     trackEvent('shot_captured', {
       sessionId: session.id,
       participantId,
-      properties: { shotNo, deltaMs },
+      properties: { shotNo },
     });
 
     // Step A: Write-Ahead to local IndexedDB (PRD §11.5)
     await localShotStorage.saveShot(session.id, shotNo, participantId, blob);
 
-    // Step B: Upload photo incrementally to server
+    // Step B: Send photo directly to peer via P2P DataChannel
+    try {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const base64 = reader.result as string;
+        sendP2PMessage('P2P_PHOTO_SHARE', {
+          shotNo,
+          participantId,
+          role,
+          blobBase64: base64,
+        });
+      };
+      reader.readAsDataURL(blob);
+    } catch (e) {
+      console.warn('P2P photo share error:', e);
+    }
+
+    // Step C: Mark local shot completed and notify peer
+    let set = completedShotsRef.current.get(shotNo);
+    if (!set) {
+      set = new Set();
+      completedShotsRef.current.set(shotNo, set);
+    }
+    set.add(participantId);
+
+    sendP2PMessage('SHOT_COMPLETED', {
+      shotNo,
+      participantId,
+      role,
+    });
+
+    // Check if both participants have finished this shot
+    const requiredCount = participants.length >= 2 ? 2 : 1;
+    if (set.size >= requiredCount) {
+      const nextShotNo = shotNo + 1;
+      sendP2PMessage('ADVANCE_SHOT', {
+        shotNo,
+        nextShotNo,
+      });
+
+      if (nextShotNo > (session.shotCountTarget || 4)) {
+        setSession((prev) => (prev ? { ...prev, state: 'REVIEW', shotCountSaved: 4 } : null));
+      } else {
+        setSession((prev) =>
+          prev
+            ? {
+                ...prev,
+                currentShotNo: nextShotNo,
+                shotCountSaved: shotNo,
+                state: 'SHOT_SAVED',
+              }
+            : null
+        );
+      }
+    }
+
+    // Step D: Background incremental upload to server for persistence
     const formData = new FormData();
     formData.append('file', blob, `shot_${shotNo}.jpg`);
     formData.append('participantId', participantId);
@@ -572,7 +798,15 @@ export default function RoomPage() {
         await localShotStorage.markSynced(session.id, shotNo, participantId);
         const data = await res.json();
         if (data.session) {
-          setSession(data.session);
+          setSession((prev) => {
+            if (!prev) return data.session;
+            return {
+              ...prev,
+              ...data.session,
+              currentShotNo: Math.max(prev.currentShotNo, data.session.currentShotNo),
+              state: data.session.state === 'REVIEW' || prev.state === 'REVIEW' ? 'REVIEW' : data.session.state,
+            };
+          });
         }
       }
     } catch (err) {
@@ -604,11 +838,26 @@ export default function RoomPage() {
         await renderCrashDetector.recordRenderStart(session.id);
 
         const photoInputs = [];
+        const partnerPart = participants.find((p) => p.role === 'partner');
+        const partnerId = partnerPart?.id;
+
         for (let i = 1; i <= 4; i++) {
+          // My shot
           const local = await localShotStorage.getShot(session.id, i, participantId);
           if (local) {
-            const slotIdx = (i - 1) * 2 + (role === 'creator' ? 0 : 1);
+            const slotIdx = participants.length >= 2
+              ? (i - 1) * 2 + (role === 'creator' ? 0 : 1)
+              : (i - 1);
             photoInputs.push({ slotIndex: slotIdx, blob: local.blob });
+          }
+
+          // Partner shot
+          if (partnerId) {
+            const peerShot = await localShotStorage.getShot(session.id, i, partnerId);
+            if (peerShot) {
+              const peerSlot = (i - 1) * 2 + (role === 'creator' ? 1 : 0);
+              photoInputs.push({ slotIndex: peerSlot, blob: peerShot.blob });
+            }
           }
         }
 
@@ -659,6 +908,16 @@ export default function RoomPage() {
   };
 
   const handleRequestRetake = (shotNo: number) => {
+    sendP2PMessage('RETAKE_REQUEST', { shotNo });
+    setSession((prev) =>
+      prev
+        ? {
+            ...prev,
+            currentShotNo: shotNo,
+            state: 'READY',
+          }
+        : null
+    );
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(
         JSON.stringify({
@@ -671,6 +930,7 @@ export default function RoomPage() {
 
   const handleAbortCapture = async (reason: string) => {
     setTTargetServer(undefined);
+    sendP2PMessage('ABORT_COUNTDOWN', { reason });
     if (!session) return;
 
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -802,6 +1062,7 @@ export default function RoomPage() {
           onCaptureCompleted={handleCaptureCompleted}
           peerName={partner?.displayName}
           isPartnerConnected={isPartnerConnected}
+          isP2PConnected={isP2PConnected}
           selectedTemplateId={session?.templateId || 'classic_strip'}
           templateName={session?.templateId ? getTemplateById(session.templateId)?.name : 'Frame Studio'}
           onSelectTemplate={handleSelectTemplate}

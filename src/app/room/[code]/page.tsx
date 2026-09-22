@@ -882,6 +882,22 @@ export default function RoomPage() {
       }
 
       if (stripBlob) {
+        // Save to local IndexedDB for immediate 0ms load on /r/[token]
+        await localShotStorage.saveComposedStrip(session.resultToken, 'strip', stripBlob);
+
+        // Upload composed strip to server so any external viewer can see it immediately
+        try {
+          const formData = new FormData();
+          formData.append('file', stripBlob, 'strip.jpg');
+          formData.append('format', 'strip');
+          await fetch(`/api/results/${session.resultToken}`, {
+            method: 'POST',
+            body: formData,
+          });
+        } catch (uploadErr) {
+          console.warn('Background result upload warning:', uploadErr);
+        }
+
         router.push(`/r/${session.resultToken}`);
       }
     } catch {

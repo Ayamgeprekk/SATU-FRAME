@@ -55,9 +55,11 @@ class TimelineStore {
     return id ? this.timelines.get(id) : undefined;
   }
 
-  public claimOrUpdateTimeline(req: ClaimTimelineRequest): CoupleTimeline {
+  public async claimOrUpdateTimeline(req: ClaimTimelineRequest): Promise<CoupleTimeline> {
     const cleanEmail = req.email.toLowerCase().trim();
-    const session = sessionStateManager.getSessionByResultToken(req.resultToken);
+    const session =
+      (await sessionStateManager.getSessionByResultTokenAsync(req.resultToken)) ||
+      sessionStateManager.getSessionByResultToken(req.resultToken);
 
     let timeline = this.getTimelineByEmail(cleanEmail);
     const now = Date.now();

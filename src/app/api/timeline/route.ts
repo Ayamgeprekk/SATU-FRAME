@@ -38,7 +38,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const timeline = timelineStore.claimOrUpdateTimeline(body);
+    const timeline = await timelineStore.claimOrUpdateTimeline(body);
 
     return NextResponse.json({
       success: true,

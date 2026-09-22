@@ -232,16 +232,26 @@ export class SessionStateManager {
   }
 
   public getSessionByResultToken(token: string): Session | undefined {
+    this.loadState();
     for (const s of this.sessions.values()) {
       if (s.resultToken === token) return s;
     }
     return undefined;
   }
 
+  public async getSessionByResultTokenAsync(token: string): Promise<Session | undefined> {
+    const sessionId = await cloudGet<string>(`result_${token}`);
+    if (sessionId) {
+      return await this.getSessionAsync(sessionId);
+    }
+    return this.getSessionByResultToken(token);
+  }
+
   public async createSessionAsync(templateId = 'classic_strip'): Promise<{ session: Session; creatorToken: string }> {
     const res = this.createSession(templateId);
     await Promise.all([
       cloudSet(`room_${res.session.roomCode.toUpperCase()}`, res.session.id),
+      cloudSet(`result_${res.session.resultToken}`, res.session.id),
       cloudSet(`session_${res.session.id}`, res.session),
       cloudSet(`parts_${res.session.id}`, this.participants.get(res.session.id) || []),
     ]);

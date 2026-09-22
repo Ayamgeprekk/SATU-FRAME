@@ -146,6 +146,51 @@ class LocalShotStorage {
       }
     }
   }
+
+  public async saveComposedStrip(resultToken: string, format: string, blob: Blob): Promise<void> {
+    const key = `sf_strip_${resultToken}_${format}`;
+    try {
+      const db = await this.getDB();
+      if (db) {
+        const tx = db.transaction(STORE_NAME, 'readwrite');
+        await tx.store.put({
+          id: key,
+          sessionId: resultToken,
+          shotNo: 999,
+          participantId: format,
+          blob,
+          status: 'LOCAL_ONLY',
+          createdAt: Date.now(),
+        });
+        await tx.done;
+        return;
+      }
+    } catch {}
+
+    this.memoryFallback.set(key, {
+      id: key,
+      sessionId: resultToken,
+      shotNo: 999,
+      participantId: format,
+      blob,
+      status: 'LOCAL_ONLY',
+      createdAt: Date.now(),
+    });
+  }
+
+  public async getComposedStrip(resultToken: string, format = 'strip'): Promise<Blob | null> {
+    const key = `sf_strip_${resultToken}_${format}`;
+    try {
+      const db = await this.getDB();
+      if (db) {
+        const item = await db.get(STORE_NAME, key);
+        if (item) return item.blob;
+      }
+    } catch {}
+
+    const mem = this.memoryFallback.get(key);
+    return mem ? mem.blob : null;
+  }
 }
 
 export const localShotStorage = new LocalShotStorage();

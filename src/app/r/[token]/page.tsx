@@ -7,6 +7,7 @@ import confetti from 'canvas-confetti';
 import Link from 'next/link';
 import Image from 'next/image';
 import { trackEvent } from '@/lib/analytics';
+import { localShotStorage } from '@/lib/storage/indexeddb-storage';
 
 interface OrderInfo {
   id: string;
@@ -84,10 +85,20 @@ export default function ResultPage() {
   const fetchResultData = useCallback(
     async (format = selectedFormat) => {
       try {
+        // Instant visual feedback from local IndexedDB cache if available
+        const localBlob = await localShotStorage.getComposedStrip(resultToken, format);
+        if (localBlob) {
+          const localUrl = URL.createObjectURL(localBlob);
+          setPhotostripUrl(localUrl);
+          setIsLoading(false);
+        }
+
         const res = await fetch(`/api/results/${resultToken}?format=${format}`);
         if (res.ok) {
           const data = await res.json();
-          setPhotostripUrl(data.photostripUrl);
+          if (data.photostripUrl) {
+            setPhotostripUrl(data.photostripUrl);
+          }
           setIsPaidHd(data.tier === 'paid_hd');
           if (data.session?.id) setSessionId(data.session.id);
         }

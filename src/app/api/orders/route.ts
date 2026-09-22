@@ -11,7 +11,9 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Parameter tidak lengkap' }, { status: 400 });
     }
 
-    const session = sessionStateManager.getSessionByResultToken(resultToken);
+    const session =
+      (await sessionStateManager.getSessionByResultTokenAsync(resultToken)) ||
+      sessionStateManager.getSessionByResultToken(resultToken);
     if (!session) {
       return NextResponse.json({ error: 'Sesi tidak ditemukan' }, { status: 404 });
     }

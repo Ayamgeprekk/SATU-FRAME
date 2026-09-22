@@ -19,7 +19,9 @@ import {
   Layers,
   SlidersHorizontal,
   Users,
+  QrCode,
 } from 'lucide-react';
+import { RoomQrModal } from './room-qr-modal';
 
 export interface CameraFilterPreset {
   id: string;
@@ -166,6 +168,7 @@ export function PhotoboothStudio({
   const [isMirrored, setIsMirrored] = useState(true);
   const [isSpeakerOn, setIsSpeakerOn] = useState(true);
   const [copiedCode, setCopiedCode] = useState(false);
+  const [showQrModal, setShowQrModal] = useState(false);
 
   // Camera aesthetic filters (replaces redundant template selector)
   const [selectedFilterId, setSelectedFilterId] = useState<string>('natural');
@@ -437,18 +440,29 @@ export function PhotoboothStudio({
           <div className="flex items-center gap-2">
             <div className="flex flex-col">
               <span className="text-[10px] font-medium uppercase tracking-wider text-zinc-400">Booth</span>
-              <button
-                onClick={handleCopyCode}
-                className="flex items-center gap-1.5 text-xs font-bold text-white hover:text-amber-400 transition"
-                title="Klik untuk salin kode"
-              >
-                <span>Kode: {roomCode}</span>
-                {copiedCode ? (
-                  <Check className="h-3 w-3 text-emerald-400" />
-                ) : (
-                  <Copy className="h-3 w-3 text-zinc-400" />
-                )}
-              </button>
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={handleCopyCode}
+                  className="flex items-center gap-1.5 text-xs font-bold text-white hover:text-amber-400 transition"
+                  title="Klik untuk salin kode"
+                >
+                  <span>Kode: {roomCode}</span>
+                  {copiedCode ? (
+                    <Check className="h-3 w-3 text-emerald-400" />
+                  ) : (
+                    <Copy className="h-3 w-3 text-zinc-400" />
+                  )}
+                </button>
+                <button
+                  onClick={() => setShowQrModal(true)}
+                  className="flex items-center gap-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 px-2 py-1 text-[11px] font-semibold text-teal-300 hover:text-teal-200 transition min-h-[44px]"
+                  title="Tampilkan QR Code room"
+                  aria-label="Tampilkan QR Code room"
+                >
+                  <QrCode className="h-3.5 w-3.5 text-teal-400" />
+                  <span>QR</span>
+                </button>
+              </div>
             </div>
             {/* Connection Status Pill */}
             <span
@@ -674,25 +688,34 @@ export function PhotoboothStudio({
                 Bagikan tautan room ini ke pasanganmu
               </p>
 
-              <div className="mt-3 flex flex-col w-full gap-1.5">
-                {onCopyLink && (
-                  <button
-                    onClick={onCopyLink}
-                    className="flex w-full items-center justify-center gap-1.5 rounded-lg bg-zinc-800 border border-zinc-700 py-2 text-[11px] font-semibold text-zinc-200 hover:bg-zinc-700 min-h-[44px]"
-                  >
-                    <Copy className="h-3.5 w-3.5" />
-                    <span>Salin Tautan</span>
-                  </button>
-                )}
-                {onShareWhatsApp && (
-                  <button
-                    onClick={onShareWhatsApp}
-                    className="flex w-full items-center justify-center gap-1.5 rounded-lg bg-emerald-600/90 py-2 text-[11px] font-semibold text-white hover:bg-emerald-500 min-h-[44px]"
-                  >
-                    <Share2 className="h-3.5 w-3.5" />
-                    <span>WhatsApp</span>
-                  </button>
-                )}
+              <div className="mt-3 flex flex-col w-full gap-2">
+                <button
+                  onClick={() => setShowQrModal(true)}
+                  className="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-teal-600 via-teal-500 to-teal-600 py-2.5 text-xs font-bold text-white shadow-md shadow-teal-950/40 hover:brightness-110 active:scale-98 min-h-[44px] transition"
+                >
+                  <QrCode className="h-4 w-4" />
+                  <span>Scan QR Code Room</span>
+                </button>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {onCopyLink && (
+                    <button
+                      onClick={onCopyLink}
+                      className="flex w-full items-center justify-center gap-1.5 rounded-lg bg-zinc-800 border border-zinc-700 py-2 text-[11px] font-semibold text-zinc-200 hover:bg-zinc-700 min-h-[44px] transition"
+                    >
+                      <Copy className="h-3.5 w-3.5" />
+                      <span>Salin Link</span>
+                    </button>
+                  )}
+                  {onShareWhatsApp && (
+                    <button
+                      onClick={onShareWhatsApp}
+                      className="flex w-full items-center justify-center gap-1.5 rounded-lg bg-emerald-600/90 py-2 text-[11px] font-semibold text-white hover:bg-emerald-500 min-h-[44px] transition"
+                    >
+                      <Share2 className="h-3.5 w-3.5" />
+                      <span>WhatsApp</span>
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
           )}
@@ -833,6 +856,14 @@ export function PhotoboothStudio({
           </button>
         </div>
       </div>
+
+      {/* Room QR Code Modal */}
+      <RoomQrModal
+        isOpen={showQrModal}
+        onClose={() => setShowQrModal(false)}
+        roomCode={roomCode}
+        onShareWhatsApp={onShareWhatsApp}
+      />
     </div>
   );
 }
